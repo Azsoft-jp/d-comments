@@ -94,6 +94,16 @@ for (const newRenderer of [false, true]) {
     await expect(button).toBeVisible();
     await expect(button).toHaveText('PiP');
     await expect(button.locator('svg')).toBeVisible();
+    // 再生領域を離れたら消え、領域内へ戻るとボタン全体を操作できる。
+    const viewport = page.viewportSize();
+    if (!viewport) throw new Error('検証用の画面サイズを取得できません');
+    await page.mouse.move(viewport.width - 1, viewport.height - 1);
+    await expect(button).toHaveCSS('opacity', '0');
+    await expect(button).toHaveCSS('pointer-events', 'none');
+    await page.locator('#player').hover();
+    await expect(button).toHaveCSS('opacity', '1');
+    await page.mouse.move(viewport.width - 1, viewport.height - 1);
+    await expect(button).toHaveCSS('opacity', '0');
     await expect
       .poll(() => page.locator('video').evaluate((video: HTMLVideoElement) => video.currentTime))
       .toBeGreaterThan(0);
@@ -120,11 +130,14 @@ for (const newRenderer of [false, true]) {
     await page.screenshot({ path: test.info().outputPath('source.png') });
 
     // Document PiPは実ブラウザAPIを使い、動画の複製や再取得がないことを確認する。
+    if (newRenderer) await page.locator('#player').hover();
     const popup = extension.context.waitForEvent('page');
     if (newRenderer) await button.click();
     else {
       // キーボードだけでも、コメント付きPiPを起動できる。
-      await button.focus();
+      await page.keyboard.press('Tab');
+      await expect(button).toBeFocused();
+      await expect(button).toHaveCSS('opacity', '1');
       await page.keyboard.press('Enter');
     }
     const pip = await popup;
@@ -134,6 +147,15 @@ for (const newRenderer of [false, true]) {
     await expect(pip.getByRole('button', { name: '元の画面に戻す' })).toBeVisible();
     await expect(pip.getByRole('button', { name: '元の画面に戻す' })).toHaveText('戻す');
     await expect.poll(() => pip.locator('video').evaluate((video: HTMLVideoElement) => !video.paused)).toBe(true);
+    // 小窓へ移動した後も、キーボードのフォーカスがなければホバー条件で表示する。
+    const returnButton = pip.getByRole('button', { name: '元の画面に戻す' });
+    await returnButton.evaluate((element) => (element as HTMLElement).blur());
+    await pip.mouse.move(-1, -1);
+    await expect(returnButton).toHaveCSS('opacity', '0');
+    await pip.locator('#player').hover();
+    await expect(returnButton).toHaveCSS('opacity', '1');
+    await pip.mouse.move(-1, -1);
+    await expect(returnButton).toHaveCSS('opacity', '0');
 
     // 元タブ以外を前面にしても、小窓の映像とコメントが更新される。
     await extensionPage.bringToFront();
@@ -167,9 +189,11 @@ for (const newRenderer of [false, true]) {
     await expect(page.locator('[data-d-comments-pip-placeholder]')).toHaveCount(0);
 
     // 再入場と小窓内の戻すボタンでも復元し、元画面の視聴を続ける。
+    await page.locator('#player').hover();
     const secondPopup = extension.context.waitForEvent('page');
     await button.click();
     const secondPip = await secondPopup;
+    await secondPip.locator('#player').hover();
     await secondPip.getByRole('button', { name: '元の画面に戻す' }).click();
     await expect(page.locator('#player video')).toHaveCount(1);
     await expect(page.locator('#d-comments-canvas-container canvas')).toHaveCount(1);
@@ -240,6 +264,7 @@ test('スクリプトのクリックを無視し、API拒否時も元画面で�
       };
     })()`,
   });
+  await page.locator('#player').hover();
   await button.click();
   await expect(page.locator('#d-comments-pip-controls [role="status"]')).toContainText('PiPを開けませんでした');
   await expect(page.locator('#player video')).toHaveCount(1);

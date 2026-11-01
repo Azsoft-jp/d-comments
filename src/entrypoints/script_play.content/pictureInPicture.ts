@@ -72,6 +72,9 @@ export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => 
   const player = video.parentElement;
   if (!player) return () => {};
   const api = getApi();
+  const hostAttribute = 'data-d-comments-pip-host';
+  const previousHostAttribute = player.getAttribute(hostAttribute);
+  player.setAttribute(hostAttribute, '');
   const controls = document.createElement('div');
   controls.id = 'd-comments-pip-controls';
   Object.assign(controls.style, {
@@ -86,10 +89,16 @@ export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => 
     maxWidth: 'calc(100% - 24px)',
     font: '14px sans-serif',
     color: '#fff',
+    pointerEvents: 'none',
   });
-  const focusStyle = document.createElement('style');
-  focusStyle.textContent =
-    '#d-comments-pip-controls button:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }';
+  // 透明な間はクリックを遮らず、キーボードのフォーカスは受け取れる状態にする。
+  const controlsStyle = document.createElement('style');
+  controlsStyle.textContent = `
+    #d-comments-pip-button { opacity: 0; pointer-events: none; }
+    [data-d-comments-pip-host]:hover > #d-comments-pip-controls > #d-comments-pip-button,
+    #d-comments-pip-button:focus-visible { opacity: 1; pointer-events: auto; }
+    #d-comments-pip-button:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+  `;
   const button = document.createElement('button');
   button.id = 'd-comments-pip-button';
   button.type = 'button';
@@ -126,7 +135,7 @@ export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => 
   const status = document.createElement('span');
   status.setAttribute('role', 'status');
   Object.assign(status.style, { background: '#202020', whiteSpace: 'normal' });
-  controls.append(focusStyle, button, status);
+  controls.append(controlsStyle, button, status);
   player.append(controls);
 
   const originalPosition = player.style.position;
@@ -214,6 +223,8 @@ export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => 
     activeWindow?.close();
     button.removeEventListener('click', onClick);
     controls.remove();
+    if (previousHostAttribute === null) player.removeAttribute(hostAttribute);
+    else player.setAttribute(hostAttribute, previousHostAttribute);
     if (addedPosition) player.style.position = originalPosition;
     window.removeEventListener('pagehide', dispose);
   };
