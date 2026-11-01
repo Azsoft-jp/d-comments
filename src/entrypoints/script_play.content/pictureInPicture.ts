@@ -1,4 +1,7 @@
 // 映像を再取得・合成せず、再生中の要素とコメントをDocument PiPへ移して復元する。
+import { logger } from '@/lib/logger';
+import { type PipMediaSession, registerAutomaticPictureInPicture } from './automaticPictureInPicture';
+
 type DocumentPictureInPicture = {
   requestWindow(options: { width: number; height: number }): Promise<Window>;
 };
@@ -67,7 +70,7 @@ const createPipIcon = (): SVGSVGElement => {
   return icon;
 };
 
-/** ユーザーのクリックでのみ小窓を開く。非対応・拒否・閉じる操作を明示的に処理する。 */
+/** ボタン操作またはブラウザのPiP通知で開く。ページの合成クリックからは起動しない。 */
 export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => {
   const player = video.parentElement;
   if (!player) return () => {};
@@ -158,19 +161,20 @@ export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => 
     notifyPresentationChange(video);
   };
 
-  const toggle = async () => {
-    if (pipWindow) {
-      pipWindow.close();
-      restore();
+  const openPip = async () => {
+    // 自動通知と手動操作が重なっても、既存の小窓を閉じたり重複生成したりしない。
+    if (!api || pipWindow || opening || disposed) return;
+    // 標準PiPの後追い変換は起動制約があるため、既存の視聴を保って手動操作を案内する。
+    if (video.ownerDocument.pictureInPictureElement) {
+      status.textContent = '標準PiPが開いています。閉じてから「PiP」ボタンを押してください。';
       return;
     }
-    if (!api || opening || disposed) return;
     opening = true;
     button.disabled = true;
     status.textContent = '';
     let opened: Window | null = null;
     try {
-      // ユーザー操作の直後にrequestWindowを呼び、先行する非同期処理を入れない。
+      // ボタン操作またはブラウザ通知の直後に要求し、先行する非同期処理を入れない。
       opened = await api.requestWindow({ width: 640, height: 360 });
       if (disposed || !player.isConnected) {
         opened.close();
@@ -198,8 +202,9 @@ export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => 
       pipWindow.document.body.append(player);
       updateButton(true);
       notifyPresentationChange(video);
-    } catch {
+    } catch (reason) {
       // 開けない場合も元画面で視聴を続けられるよう、途中の移動を巻き戻す。
+      logger.warn('コメント付きPiPを開けませんでした。', reason);
       restore();
       opened?.close();
       status.textContent = 'PiPを開けませんでした。標準PiPや全画面を閉じて、もう一度お試しください。';
@@ -211,13 +216,28 @@ export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => 
   const onClick = (event: MouseEvent) => {
     // ページ側スクリプトのclick()で、拡張の権限を使って勝手に小窓を開かせない。
     if (!event.isTrusted) return;
-    void toggle();
+    if (pipWindow) {
+      pipWindow.close();
+      restore();
+    } else void openPip();
   };
   button.addEventListener('click', onClick);
+
+  const automaticPip = registerAutomaticPictureInPicture(
+    api ? (navigator.mediaSession as unknown as PipMediaSession | undefined) : undefined,
+    () => {
+      void openPip();
+    },
+    (reason) => logger.warn('自動PiPを登録できませんでした。手動のPiPボタンをご利用ください。', reason)
+  );
+  // サイトが再生に伴って標準PiPを登録する場合に備え、再生イベントでも接続し直す。
+  video.addEventListener('play', automaticPip.refresh);
 
   const dispose = () => {
     if (disposed) return;
     disposed = true;
+    video.removeEventListener('play', automaticPip.refresh);
+    automaticPip.dispose();
     const activeWindow = pipWindow;
     restore();
     activeWindow?.close();

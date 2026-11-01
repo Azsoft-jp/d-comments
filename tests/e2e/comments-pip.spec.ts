@@ -1,7 +1,7 @@
 // 認証や実番組を使わず、合成映像と共有スレッドで拡張の表示・PiP往復を検証する。
-import { expect } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 import type { CommentVideoData } from '../../src/types/comments';
-import { test } from './fixtures';
+import { type ExtensionFixtures, test } from './fixtures';
 
 const viewingUrl = 'https://animestore.docomo.ne.jp/animestore/sc_d_pc?partId=00000001';
 const html = `<!doctype html><html lang="ja"><head><title>合成テスト</title>
@@ -57,6 +57,61 @@ const videoData = (contentId: string, vposMs: number): CommentVideoData => ({
   ],
 });
 
+// 実APIへの登録を記録し、Chrome自身の自動起動判定とは分けて通知後の経路を検証する。
+const captureBrowserPipTrigger = async (
+  extension: ExtensionFixtures['extension'],
+  page: Page
+): Promise<{ request: () => Promise<void>; dispose: () => Promise<void> }> => {
+  const session = await extension.context.newCDPSession(page);
+  const contexts: number[] = [];
+  session.on('Runtime.executionContextCreated', ({ context }) => {
+    contexts.push(context.id);
+  });
+  await session.send('Runtime.enable');
+  let extensionContext: number | undefined;
+  for (const contextId of contexts) {
+    const result = await session.send('Runtime.evaluate', {
+      contextId,
+      expression: 'globalThis.chrome?.runtime?.id',
+      userGesture: false,
+    });
+    if (result.result.value === extension.id) extensionContext = contextId;
+  }
+  expect(extensionContext).toBeDefined();
+  const instrumentation = await session.send('Runtime.evaluate', {
+    contextId: extensionContext,
+    expression: `(() => {
+      const mediaSession = navigator.mediaSession;
+      const original = mediaSession.setActionHandler.bind(mediaSession);
+      mediaSession.setActionHandler = (action, handler) => {
+        original(action, handler);
+        if (action === 'enterpictureinpicture') globalThis.__testPipHandler = handler;
+      };
+      // サイト側の標準PiP登録が後から行われた状態を模擬する。
+      mediaSession.setActionHandler('enterpictureinpicture', () => {
+        document.querySelector('video').requestPictureInPicture();
+      });
+    })()`,
+  });
+  expect(instrumentation.exceptionDetails).toBeUndefined();
+  await page.locator('video').evaluate(async (element) => {
+    const video = element as HTMLVideoElement;
+    video.pause();
+    await video.play();
+  });
+  return {
+    async request() {
+      const result = await session.send('Runtime.evaluate', {
+        contextId: extensionContext,
+        expression: 'globalThis.__testPipHandler()',
+        userGesture: false,
+      });
+      expect(result.exceptionDetails).toBeUndefined();
+    },
+    dispose: () => session.detach(),
+  };
+};
+
 for (const newRenderer of [false, true]) {
   test(`共有コメントは1件になり、PiPへ往復できる (${newRenderer ? 'Pixi' : 'Niconi'})`, async ({
     extension,
@@ -97,6 +152,7 @@ for (const newRenderer of [false, true]) {
     // 再生領域を離れたら消え、領域内へ戻るとボタン全体を操作できる。
     const viewport = page.viewportSize();
     if (!viewport) throw new Error('検証用の画面サイズを取得できません');
+    await page.bringToFront();
     await page.mouse.move(viewport.width - 1, viewport.height - 1);
     await expect(button).toHaveCSS('opacity', '0');
     await expect(button).toHaveCSS('pointer-events', 'none');
@@ -130,9 +186,9 @@ for (const newRenderer of [false, true]) {
     await page.screenshot({ path: test.info().outputPath('source.png') });
 
     // Document PiPは実ブラウザAPIを使い、動画の複製や再取得がないことを確認する。
-    if (newRenderer) await page.locator('#player').hover();
+    const browserPip = newRenderer ? await captureBrowserPipTrigger(extension, page) : undefined;
     const popup = extension.context.waitForEvent('page');
-    if (newRenderer) await button.click();
+    if (browserPip) await browserPip.request();
     else {
       // キーボードだけでも、コメント付きPiPを起動できる。
       await page.keyboard.press('Tab');
@@ -141,6 +197,11 @@ for (const newRenderer of [false, true]) {
       await page.keyboard.press('Enter');
     }
     const pip = await popup;
+    if (browserPip) {
+      // 同じ通知を再受信しても、開いているコメント付き小窓を閉じない。
+      await browserPip.request();
+      await browserPip.dispose();
+    }
     await expect(pip.locator('#player video')).toHaveCount(1);
     await expect(pip.locator('#d-comments-canvas-container canvas')).toHaveCount(1);
     await expect(page.locator('video')).toHaveCount(0);
@@ -193,6 +254,7 @@ for (const newRenderer of [false, true]) {
     const secondPopup = extension.context.waitForEvent('page');
     await button.click();
     const secondPip = await secondPopup;
+    await expect.poll(() => page.evaluate(() => document.pictureInPictureElement === null)).toBe(true);
     await secondPip.locator('#player').hover();
     await secondPip.getByRole('button', { name: '元の画面に戻す' }).click();
     await expect(page.locator('#player video')).toHaveCount(1);
@@ -242,6 +304,15 @@ test('スクリプトのクリックを無視し、API拒否時も元画面で�
   });
   await expect(button).toBeVisible();
   await expect(page.locator('#player video')).toHaveCount(1);
+  // サイトが先に標準PiPを開いている場合でも、Document PiPの拒否でそれを閉じない。
+  await page.locator('video').evaluate((element) => (element as HTMLVideoElement).requestPictureInPicture());
+  await expect.poll(() => page.evaluate(() => document.pictureInPictureElement !== null)).toBe(true);
+  await page.locator('#player').hover();
+  await button.click();
+  await expect(page.locator('#d-comments-pip-controls [role="status"]')).toContainText('標準PiPが開いています');
+  await expect.poll(() => page.evaluate(() => document.pictureInPictureElement !== null)).toBe(true);
+  await page.evaluate(() => document.exitPictureInPicture());
+  await expect.poll(() => page.evaluate(() => document.pictureInPictureElement === null)).toBe(true);
 
   // 拡張の隔離Worldへ一度だけAPI拒否を注入し、巻き戻しと再試行を検証する。
   let extensionContext: number | undefined;
@@ -273,6 +344,7 @@ test('スクリプトのクリックを無視し、API拒否時も元画面で�
   const popup = extension.context.waitForEvent('page');
   await button.click();
   const pip = await popup;
+  await expect.poll(() => page.evaluate(() => document.pictureInPictureElement === null)).toBe(true);
   await expect(pip.locator('#player video')).toHaveCount(1);
   await pip.close();
   await expect(page.locator('#player video')).toHaveCount(1);
