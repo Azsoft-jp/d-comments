@@ -40,6 +40,33 @@ const copyStyles = (source: Document, target: Document): void => {
   target.head.append(style);
 };
 
+/** 小窓を表す自作SVGを使い、外部画像の取得なしでボタンの役割を示す。 */
+const createPipIcon = (): SVGSVGElement => {
+  const namespace = 'http://www.w3.org/2000/svg';
+  const icon = document.createElementNS(namespace, 'svg');
+  icon.setAttribute('viewBox', '0 0 24 24');
+  icon.setAttribute('width', '22');
+  icon.setAttribute('height', '22');
+  icon.setAttribute('aria-hidden', 'true');
+  icon.setAttribute('focusable', 'false');
+  const frame = document.createElementNS(namespace, 'rect');
+  for (const [name, value] of Object.entries({
+    x: '2',
+    y: '4',
+    width: '20',
+    height: '16',
+    fill: 'none',
+    stroke: 'currentColor',
+    'stroke-width': '2',
+  }))
+    frame.setAttribute(name, value);
+  const inset = document.createElementNS(namespace, 'rect');
+  for (const [name, value] of Object.entries({ x: '12', y: '12', width: '8', height: '6', fill: 'currentColor' }))
+    inset.setAttribute(name, value);
+  icon.append(frame, inset);
+  return icon;
+};
+
 /** ユーザーのクリックでのみ小窓を開く。非対応・拒否・閉じる操作を明示的に処理する。 */
 export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => {
   const player = video.parentElement;
@@ -49,22 +76,26 @@ export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => 
   controls.id = 'd-comments-pip-controls';
   Object.assign(controls.style, {
     position: 'absolute',
-    left: '12px',
-    bottom: '12px',
+    right: '12px',
+    top: '12px',
     zIndex: '2147483647',
     display: 'flex',
     gap: '8px',
-    alignItems: 'center',
+    flexDirection: 'column',
+    alignItems: 'flex-end',
     maxWidth: 'calc(100% - 24px)',
     font: '14px sans-serif',
     color: '#fff',
   });
+  const focusStyle = document.createElement('style');
+  focusStyle.textContent =
+    '#d-comments-pip-controls button:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }';
   const button = document.createElement('button');
+  button.id = 'd-comments-pip-button';
   button.type = 'button';
-  button.textContent = 'コメント付きPiP';
-  button.setAttribute('aria-pressed', 'false');
   button.disabled = !api;
-  button.title = api ? '映像とコメントを小窓で表示' : 'このブラウザはコメント付きPiPに対応していません';
+  const label = document.createElement('span');
+  button.append(createPipIcon(), label);
   Object.assign(button.style, {
     color: '#fff',
     background: '#202020',
@@ -73,11 +104,29 @@ export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => 
     padding: '6px 10px',
     cursor: api ? 'pointer' : 'default',
     flexShrink: '0',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '6px',
+    minHeight: '40px',
+    font: 'inherit',
   });
+  // 見た目の短いラベルと、支援技術向けの具体的な操作名を同時に更新する。
+  const updateButton = (inPip: boolean) => {
+    label.textContent = inPip ? '戻す' : 'PiP';
+    button.setAttribute('aria-label', inPip ? '元の画面に戻す' : 'コメント付きPiP');
+    button.setAttribute('aria-pressed', String(inPip));
+    button.title = !api
+      ? 'このブラウザはコメント付きPiPに対応していません'
+      : inPip
+        ? '元の画面に戻す'
+        : 'Document PiPで映像とコメントを小窓に表示';
+  };
+  updateButton(false);
   const status = document.createElement('span');
   status.setAttribute('role', 'status');
   Object.assign(status.style, { background: '#202020', whiteSpace: 'normal' });
-  controls.append(button, status);
+  controls.append(focusStyle, button, status);
   player.append(controls);
 
   const originalPosition = player.style.position;
@@ -96,8 +145,7 @@ export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => 
     if (originalStyle === null) player.removeAttribute('style');
     else player.setAttribute('style', originalStyle);
     pipWindow = null;
-    button.textContent = 'コメント付きPiP';
-    button.setAttribute('aria-pressed', 'false');
+    updateButton(false);
     notifyPresentationChange(video);
   };
 
@@ -139,8 +187,7 @@ export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => 
       pipWindow = opened;
       pipWindow.addEventListener('pagehide', restore, { once: true });
       pipWindow.document.body.append(player);
-      button.textContent = '元の画面に戻す';
-      button.setAttribute('aria-pressed', 'true');
+      updateButton(true);
       notifyPresentationChange(video);
     } catch {
       // 開けない場合も元画面で視聴を続けられるよう、途中の移動を巻き戻す。

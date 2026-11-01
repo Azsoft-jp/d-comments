@@ -92,6 +92,8 @@ for (const newRenderer of [false, true]) {
     await page.goto(viewingUrl);
     const button = page.getByRole('button', { name: 'コメント付きPiP', exact: true });
     await expect(button).toBeVisible();
+    await expect(button).toHaveText('PiP');
+    await expect(button.locator('svg')).toBeVisible();
     await expect
       .poll(() => page.locator('video').evaluate((video: HTMLVideoElement) => video.currentTime))
       .toBeGreaterThan(0);
@@ -119,12 +121,18 @@ for (const newRenderer of [false, true]) {
 
     // Document PiPは実ブラウザAPIを使い、動画の複製や再取得がないことを確認する。
     const popup = extension.context.waitForEvent('page');
-    await button.click();
+    if (newRenderer) await button.click();
+    else {
+      // キーボードだけでも、コメント付きPiPを起動できる。
+      await button.focus();
+      await page.keyboard.press('Enter');
+    }
     const pip = await popup;
     await expect(pip.locator('#player video')).toHaveCount(1);
     await expect(pip.locator('#d-comments-canvas-container canvas')).toHaveCount(1);
     await expect(page.locator('video')).toHaveCount(0);
     await expect(pip.getByRole('button', { name: '元の画面に戻す' })).toBeVisible();
+    await expect(pip.getByRole('button', { name: '元の画面に戻す' })).toHaveText('戻す');
     await expect.poll(() => pip.locator('video').evaluate((video: HTMLVideoElement) => !video.paused)).toBe(true);
 
     // 元タブ以外を前面にしても、小窓の映像とコメントが更新される。
@@ -155,6 +163,7 @@ for (const newRenderer of [false, true]) {
     await expect(page.locator('#player video')).toHaveCount(1);
     await expect(page.locator('#d-comments-canvas-container canvas')).toHaveCount(1);
     await expect(button).toBeVisible();
+    await expect(button).toHaveText('PiP');
     await expect(page.locator('[data-d-comments-pip-placeholder]')).toHaveCount(0);
 
     // 再入場と小窓内の戻すボタンでも復元し、元画面の視聴を続ける。
