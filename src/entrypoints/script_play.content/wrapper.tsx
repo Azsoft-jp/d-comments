@@ -1,7 +1,7 @@
-import { createRoot, type Root } from 'react-dom/client';
+// 再生領域とサイドバーの配置を用意する。React Rootは呼び出し元だけで作成する。
 import { findElement } from '@/lib/dom';
 
-export async function videoWrapper(): Promise<Root | undefined> {
+export async function videoWrapper(): Promise<HTMLElement | undefined> {
   const video = await findElement<HTMLVideoElement>('video');
   if (!video) return undefined;
 
@@ -57,5 +57,5 @@ export async function videoWrapper(): Promise<Root | undefined> {
     wrapper.append(sideMenu);
   }
 
-  return createRoot(sideMenu);
+  return sideMenu;
 }

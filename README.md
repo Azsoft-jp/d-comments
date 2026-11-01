@@ -84,6 +84,9 @@ pnpm lint
 
 ### UI / E2E debugging
 
+コメント重複の修正、Document PiPの使い方、合成素材による検証と未検証事項は、
+[コメントとDocument PiPの検証手順](docs/comments-pip-debugging.md)を参照してください。
+
 Storybook はブラウザ拡張のUI部品を、拡張APIや実サイトから切り離して確認するために使います。
 現在はコメントカードの通常・選択中・ニコる非表示の状態を収録しています。
 

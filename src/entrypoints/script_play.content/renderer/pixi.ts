@@ -1,3 +1,4 @@
+// Pixi描画の状態を管理し、Document PiPでも映像と同じWindowの時計で更新する。
 import 'pixi.js/unsafe-eval';
 import { Container, type RenderTexture, type TextStyle } from 'pixi.js';
 import { getConfig, watchConfig } from '@/config/storage';
@@ -15,6 +16,7 @@ import { mountOverlay, queryVideoElement } from './core/dom';
 import { createNodeOps, type Node } from './core/node';
 import { createPixiScene } from './core/scene';
 import type { CommentLocation, TimelineComment } from './core/types';
+import { createVideoFrameLoop } from './frameLoop';
 import type { RendererController } from './types';
 
 type ActiveItem = {
@@ -75,6 +77,11 @@ export const createPixiRenderer = async (): Promise<Result<RendererController, s
   setFps(initialFps);
   app.ticker.autoStart = false;
   app.ticker.stop();
+  const frameLoop = createVideoFrameLoop(
+    video,
+    (now) => app.ticker.update(now),
+    () => targetFps
+  );
 
   const opacity = (value: number) => {
     app.canvas.style.opacity = Math.max(value / 100, 0).toString();
@@ -82,12 +89,9 @@ export const createPixiRenderer = async (): Promise<Result<RendererController, s
 
   let isVisible = initialVisibility;
   const updateTickerState = () => {
-    const shouldRun = isVisible && Boolean(cachedThreads);
-    if (shouldRun) {
-      if (!app.ticker.started) app.ticker.start();
-    } else if (app.ticker.started) {
-      app.ticker.stop();
-    }
+    const shouldRun = isVisible && Boolean(cachedThreads?.length);
+    if (shouldRun) frameLoop.start();
+    else frameLoop.stop();
   };
 
   const visible = (value: boolean) => {
@@ -145,7 +149,7 @@ export const createPixiRenderer = async (): Promise<Result<RendererController, s
     if (!node) return;
     detach(node.container);
     nodeCache.delete(id);
-    // Drop unused textures to avoid WebGPU memory growth.
+    // 未使用のテクスチャを解放し、WebGPUのメモリ増加を抑える。
     const texture = node.sprite.texture;
     let used = false;
     for (const item of nodeCache.values()) {
@@ -337,6 +341,7 @@ export const createPixiRenderer = async (): Promise<Result<RendererController, s
   updateTickerState();
 
   const dispose = () => {
+    frameLoop.dispose();
     app.ticker.remove(tick);
     clearAll();
     nodeOps.clearTextures();

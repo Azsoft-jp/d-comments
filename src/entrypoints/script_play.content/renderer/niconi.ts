@@ -1,3 +1,4 @@
+// 既存のコメント描画を管理し、映像と同じWindowで描画を継続する。
 import type { Options, V1Thread } from '@xpadev-net/niconicomments';
 import NiconiComments from '@xpadev-net/niconicomments';
 import { getConfig, watchConfig } from '@/config/storage';
@@ -5,6 +6,7 @@ import type { Result } from '@/lib/types';
 import type { Threads } from '@/types/api';
 import { CANVAS_HEIGHT, CANVAS_WIDTH } from './core/constants';
 import { mountOverlay, queryVideoElement } from './core/dom';
+import { createVideoFrameLoop } from './frameLoop';
 import type { RendererController } from './types';
 
 export const createNiconiRenderer = async (): Promise<Result<RendererController, string>> => {
@@ -14,7 +16,7 @@ export const createNiconiRenderer = async (): Promise<Result<RendererController,
   const { overlay } = mountOverlay(video);
   let canvas = overlay.querySelector<HTMLCanvasElement>('#d-comments-canvas');
   if (!canvas) {
-    canvas = document.createElement('canvas');
+    canvas = video.ownerDocument.createElement('canvas');
     canvas.id = 'd-comments-canvas';
   }
   canvas.width = CANVAS_WIDTH;
@@ -42,8 +44,7 @@ export const createNiconiRenderer = async (): Promise<Result<RendererController,
   let isVisible = initialVisibility;
   const options: Options = { format: 'v1', keepCA: true, scale: Math.max(initialScale / 100, 0) };
   const clampFps = (value: number) => Math.min(120, Math.max(15, Math.round(Number.isFinite(value) ? value : 60)));
-  let frameIntervalMs = 1000 / clampFps(initialFps);
-  let lastDrawAt = performance.now();
+  let targetFps = clampFps(initialFps);
 
   canvas.style.opacity = (initialOpacity / 100).toString();
   canvas.style.display = isVisible ? 'block' : 'none';
@@ -51,49 +52,36 @@ export const createNiconiRenderer = async (): Promise<Result<RendererController,
 
   let renderer: NiconiComments | null = null;
   let rendererReady = false;
-  let rafId: number | null = null;
   let currentThreads: Threads = [];
   let disposed = false;
-
-  const stopLoop = () => {
-    if (rafId !== null) cancelAnimationFrame(rafId);
-    rafId = null;
+  let forceDraw = true;
+  const onPresentationChange = () => {
+    forceDraw = true;
   };
-  const startLoop = () => {
-    if (rafId === null) rafId = requestAnimationFrame(tick);
-  };
+  video.addEventListener('d-comments-presentation-change', onPresentationChange);
 
   const tick = (): number => {
     if (disposed) return 0;
-    if (!renderer) {
-      rafId = requestAnimationFrame(tick);
-      return 0;
-    }
-    const videoNow = queryVideoElement();
-    if (!videoNow) {
-      rafId = requestAnimationFrame(tick);
-      return 0;
-    }
-    const now = performance.now();
-    if (now - lastDrawAt < frameIntervalMs) {
-      rafId = requestAnimationFrame(tick);
-      return 0;
-    }
-    lastDrawAt = now;
+    if (!renderer) return 0;
+    // PiPへ移動した映像は元DocumentのquerySelectorでは見つからない。
+    const videoNow = video.isConnected ? video : queryVideoElement();
+    if (!videoNow) return 0;
     if (!canvas.isConnected) {
-      stopLoop();
+      frameLoop.stop();
       return 0;
     }
     if (rendererReady && renderer) {
       const vpos = Math.max(0, Math.floor((videoNow.currentTime * 1000 + offsetMs) / 10));
-      (renderer as unknown as { drawCanvas: (frame: number) => void }).drawCanvas(vpos);
+      // 移動直後は同じ再生時刻でも再描画し、描画済み判定で空のままにしない。
+      renderer.drawCanvas(vpos, forceDraw);
+      forceDraw = false;
     }
-    rafId = requestAnimationFrame(tick);
     return 1;
   };
+  const frameLoop = createVideoFrameLoop(video, tick, () => targetFps);
 
   const clearRenderer = () => {
-    stopLoop();
+    frameLoop.stop();
     if (renderer) renderer.clear();
     renderer = null;
     rendererReady = false;
@@ -103,10 +91,12 @@ export const createNiconiRenderer = async (): Promise<Result<RendererController,
     if (!isVisible || currentThreads.length === 0) return clearRenderer();
     clearRenderer();
     if (!canvas.isConnected) return;
-    renderer = new NiconiComments(canvas, currentThreads as V1Thread[], options);
+    // 別Windowのcanvasはinstanceofに通らないため、描画Adapterを明示して渡す。
+    const adapter = NiconiComments.internal.renderer.createRenderer(canvas);
+    renderer = new NiconiComments(adapter, currentThreads as V1Thread[], options);
     rendererReady = true;
-    lastDrawAt = performance.now();
-    startLoop();
+    forceDraw = true;
+    frameLoop.start();
   };
 
   const applyVisibility = (visible: boolean) => {
@@ -130,8 +120,7 @@ export const createNiconiRenderer = async (): Promise<Result<RendererController,
   );
   stops.push(
     watchConfig('comment_renderer_fps', (value) => {
-      frameIntervalMs = 1000 / clampFps(value);
-      lastDrawAt = performance.now();
+      targetFps = clampFps(value);
     })
   );
   stops.push(
@@ -154,9 +143,11 @@ export const createNiconiRenderer = async (): Promise<Result<RendererController,
   const dispose = () => {
     if (disposed) return;
     disposed = true;
+    frameLoop.dispose();
+    video.removeEventListener('d-comments-presentation-change', onPresentationChange);
     clearRenderer();
     for (const stop of stops) stop();
-    canvas.style.display = 'none';
+    canvas.remove();
     overlay.style.display = 'none';
   };
 

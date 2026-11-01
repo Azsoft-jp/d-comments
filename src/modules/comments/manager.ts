@@ -1,3 +1,4 @@
+// コメントの取得・選択状態を管理し、表示時に共有スレッドの重複を除く。
 import { getConfig } from '@/config/storage';
 import { ok, type Result } from '@/lib/types';
 import { toCommentVideoData } from '@/lib/utils';
@@ -5,6 +6,7 @@ import type { NvCommentItem, Threads } from '@/types/api';
 import type { CommentVideoData } from '@/types/comments';
 import { createNgFilter, normalizeNgList } from './ngFilters';
 import { createCommentService } from './service';
+import { mergeCommentThreads } from './threads';
 import type { CommentManager, CommentManagerDependencies } from './types';
 
 const clone = <T>(value: T): T => structuredClone(value);
@@ -43,8 +45,9 @@ export const getComments = async (
 
 export const getPlaying = (manager: CommentManager): CommentVideoData[] => manager.playing.map(clone);
 
+/** 動画ごとの選択状態は保ち、両レンダラーへ渡す表示用スレッドだけを統合する。 */
 export const getThreads = (manager: CommentManager): Threads =>
-  manager.playing.flatMap((video) => video.threads.map(clone));
+  mergeCommentThreads(manager.playing.flatMap((video) => video.threads));
 
 export const addPlayingVideo = (manager: CommentManager, video: CommentVideoData): CommentManager => {
   const updated = clone({ ...video, date: manager.now() });
@@ -69,5 +72,5 @@ export const sortComments = (list: readonly NvCommentItem[]): NvCommentItem[] =>
 
 export const flattenComments = (threads: Threads, forks: readonly string[]): NvCommentItem[] => {
   const targets = new Set(forks);
-  return threads.filter((thread) => targets.has(thread.fork)).flatMap((thread) => thread.comments.map(clone));
+  return mergeCommentThreads(threads.filter((thread) => targets.has(thread.fork))).flatMap((thread) => thread.comments);
 };

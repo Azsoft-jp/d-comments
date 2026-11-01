@@ -1,3 +1,4 @@
+// 視聴ページのコメントとPiPを起動し、拡張の無効化時に購読・描画を終了する。
 import '@mantine/core/styles.css';
 import { createRoot, type Root } from 'react-dom/client';
 import { getConfig, watchConfig } from '@/config/storage';
@@ -11,7 +12,9 @@ import { searchEpisodeCandidates } from '@/modules/episodeSearch';
 import { getWorkChannel, resolveWorkChannel, saveWorkChannel } from '@/modules/workChannels';
 import type { Threads } from '@/types/api';
 import type { CommentVideoData } from '@/types/comments';
+import { mountPictureInPicture } from './pictureInPicture';
 import { renderer, type RendererMode } from './renderer';
+import { queryVideoElement } from './renderer/core/dom';
 import type { RendererController } from './renderer/types';
 import { CommentSidebar } from './sidebar';
 import { updateWorkInfo } from './workInfo';
@@ -26,12 +29,11 @@ export default defineContentScript({
   async main(ctx) {
     const href = window.location.href;
     if (!isVideoPage(href)) return;
-    await videoWrapper();
+    const sideMenu = await videoWrapper();
+    if (!sideMenu || ctx.isInvalid) return;
 
     const commentManager = createCommentManager();
-
-    const sideMenu = document.getElementById('d-comments-side');
-    if (!sideMenu) return;
+    const video = queryVideoElement();
 
     let sidebarHost = sideMenu.querySelector('d-comments-sidebar');
     if (!sidebarHost) {
@@ -93,35 +95,55 @@ export default defineContentScript({
       rendererController = null;
       rendererMode = null;
     };
+    ctx.onInvalidated(() => {
+      resetRenderer();
+      sidebarRoot?.unmount();
+    });
 
-    const ensureRendererMode = async (nextMode: RendererMode, threads: Threads) => {
+    const ensureRendererMode = async (nextMode: RendererMode) => {
       if (rendererController && rendererMode === nextMode) {
-        rendererController.setThreads(threads);
+        rendererController.setThreads(currentThreads);
         return ok(nextMode);
       }
       resetRenderer();
       const init = await renderer.init(nextMode);
       if (!init.ok) return err(new Error(init.error));
+      if (ctx.isInvalid) {
+        init.value.dispose?.();
+        return err(new Error('コメント表示の初期化が中断されました'));
+      }
       rendererController = init.value;
       rendererMode = nextMode;
-      rendererController.setThreads(threads);
+      // 初期化中に届いた更新を失わないよう、完了時点の最新データを使う。
+      rendererController.setThreads(currentThreads);
       return ok(nextMode);
     };
 
-    const applyRendererMode = async (mode: RendererMode) => {
-      const res = await ensureRendererMode(mode, currentThreads);
-      if (!res.ok) return ensureRendererMode('niconi', currentThreads);
-      return res;
+    // 設定の連続変更でも、非同期の初期化が重なってcanvasを二重生成しない。
+    let rendererUpdate = Promise.resolve();
+    const applyRendererMode = (mode: RendererMode): Promise<void> => {
+      rendererUpdate = rendererUpdate
+        .then(async () => {
+          if (ctx.isInvalid) return;
+          const res = await ensureRendererMode(mode);
+          if (!res.ok) logger.error(res.error);
+        })
+        .catch(logger.error);
+      return rendererUpdate;
     };
     const initialMode = (await getConfig('use_new_renderer')) ? 'pixi' : 'niconi';
     await applyRendererMode(initialMode);
-    watchConfig('use_new_renderer', (enabled) => {
-      applyRendererMode(enabled ? 'pixi' : 'niconi').catch(() => {
-        applyRendererMode('niconi').catch(logger.error);
-      });
-    });
+    if (video && !ctx.isInvalid) {
+      ctx.onInvalidated(mountPictureInPicture(video));
+    }
+    if (ctx.isInvalid) return;
+    ctx.onInvalidated(
+      watchConfig('use_new_renderer', (enabled) => {
+        void applyRendererMode(enabled ? 'pixi' : 'niconi');
+      })
+    );
 
-    onMessage('comment_state_update', (payload) => setThreads(payload.threads));
+    ctx.onInvalidated(onMessage('comment_state_update', (payload) => setThreads(payload.threads)));
 
     const handlePartChange = async () => {
       unwrap(await requestMessageResult('clear_videos'), 'clear_videos failed');
@@ -163,8 +185,9 @@ export default defineContentScript({
     const params = new URLSearchParams(window.location.search);
     let lastPartId = params.get('partId');
     if (lastPartId) await handlePartChange();
+    if (ctx.isInvalid) return;
 
-    window.setInterval(() => {
+    const partTimer = window.setInterval(() => {
       const currentPartId = new URLSearchParams(window.location.search).get('partId');
       if (!currentPartId || currentPartId === lastPartId) {
         return;
@@ -172,6 +195,7 @@ export default defineContentScript({
       lastPartId = currentPartId;
       handlePartChange().catch(logger.error);
     }, 500);
+    ctx.onInvalidated(() => window.clearInterval(partTimer));
   },
   matches: ['*://animestore.docomo.ne.jp/animestore/*'],
   runAt: 'document_start',
