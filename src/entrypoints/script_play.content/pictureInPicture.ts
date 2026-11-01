@@ -1,6 +1,7 @@
 // 映像を再取得・合成せず、再生中の要素とコメントをDocument PiPへ移して復元する。
 import { logger } from '@/lib/logger';
 import { type PipMediaSession, registerAutomaticPictureInPicture } from './automaticPictureInPicture';
+import { presentVideoInPip } from './pipPresentation';
 
 type DocumentPictureInPicture = {
   requestWindow(options: { width: number; height: number }): Promise<Window>;
@@ -12,35 +13,6 @@ const getApi = (): DocumentPictureInPicture | undefined =>
 /** 移動後のDocumentを描画ループへ知らせ、非表示になった元タブのrAFに依存しない。 */
 export const notifyPresentationChange = (video: HTMLVideoElement): void => {
   video.dispatchEvent(new Event('d-comments-presentation-change'));
-};
-
-const copyStyles = (source: Document, target: Document): void => {
-  const base = target.createElement('base');
-  base.href = source.baseURI;
-  target.head.append(base);
-  for (const sheet of source.styleSheets) {
-    if (sheet.disabled) continue;
-    // 外部CSS内の相対URLは、そのCSS自身のURLを基準に解決する。
-    if (sheet.href) {
-      const link = target.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = sheet.href;
-      link.media = sheet.media.mediaText;
-      target.head.append(link);
-    } else {
-      try {
-        const style = target.createElement('style');
-        style.textContent = [...sheet.cssRules].map((rule) => rule.cssText).join('\n');
-        style.media = sheet.media.mediaText;
-        target.head.append(style);
-      } catch {
-        // 読み取れないスタイルは複製せず、下の最小限の表示スタイルを使う。
-      }
-    }
-  }
-  const style = target.createElement('style');
-  style.textContent = 'html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }';
-  target.head.append(style);
 };
 
 /** 小窓を表す自作SVGを使い、外部画像の取得なしでボタンの役割を示す。 */
@@ -145,18 +117,16 @@ export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => 
   const addedPosition = getComputedStyle(player).position === 'static';
   if (addedPosition) player.style.position = 'relative';
   let pipWindow: Window | null = null;
-  let placeholder: HTMLDivElement | null = null;
-  let originalStyle: string | null = null;
+  let restorePresentation: (() => void) | null = null;
   let opening = false;
   let disposed = false;
 
   const restore = () => {
-    if (!placeholder) return;
-    placeholder.replaceWith(player);
-    placeholder = null;
-    if (originalStyle === null) player.removeAttribute('style');
-    else player.setAttribute('style', originalStyle);
+    const restoreDom = restorePresentation;
+    restorePresentation = null;
     pipWindow = null;
+    if (!restoreDom) return;
+    restoreDom();
     updateButton(false);
     notifyPresentationChange(video);
   };
@@ -180,26 +150,10 @@ export const mountPictureInPicture = (video: HTMLVideoElement): (() => void) => 
         opened.close();
         return;
       }
-      copyStyles(document, opened.document);
       opened.document.title = 'd-comments コメント付きPiP';
-      const rect = player.getBoundingClientRect();
-      placeholder = document.createElement('div');
-      placeholder.dataset.dCommentsPipPlaceholder = '';
-      Object.assign(placeholder.style, { width: `${rect.width}px`, height: `${rect.height}px`, flex: '1 1 auto' });
-      player.replaceWith(placeholder);
-      originalStyle = player.getAttribute('style');
-      Object.assign(player.style, {
-        position: 'relative',
-        width: '100%',
-        height: '100%',
-        maxWidth: 'none',
-        maxHeight: 'none',
-        margin: '0',
-        flex: 'none',
-      });
       pipWindow = opened;
       pipWindow.addEventListener('pagehide', restore, { once: true });
-      pipWindow.document.body.append(player);
+      restorePresentation = presentVideoInPip(video, controls, pipWindow);
       updateButton(true);
       notifyPresentationChange(video);
     } catch (reason) {
